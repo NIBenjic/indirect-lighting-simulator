@@ -24,6 +24,11 @@ import {
   validateLight,
 } from './core.js';
 import {
+  analyzeGlareBox,
+  inGlareBox,
+  segmentOccluded,
+} from './glare.js';
+import {
   TEMPLATES,
   TEMPLATE_LABELS,
   arcEndpoints,
@@ -52,7 +57,7 @@ const S = {
   refl:  { ceiling: 0.85, wall: 0.75, floor: 0.35 },
   ray:   { density: 20, bounces: 1 },
   eye:   { height: 1.65, xRatio: 0.50, show: true },
-  glare: { width: 0.08, height: 0.04, hAnchor: 'wall', vAnchor: 'center' }, // 燈具裸露邊界（公尺）＋基準角
+  glare: { width: 0.04, height: 0.04, hAnchor: 'wall', vAnchor: 'center' }, // 燈具裸露邊界（公尺）＋基準角
   // 指定點照度估算：燈帶每公尺光通量(lm/m)、發光分佈、受光面朝向、量測點清單(世界座標,公尺;結果內嵌)、放置模式旗標
   // 每點：{ x, y, result: { lux, direct, indirect } | null }；placing 不持久化
   illum: { lmPerM: 1000, dist: 'lambert', normal: 'up', points: [], placing: false },
@@ -670,7 +675,7 @@ function drawCoveGeo(scene, side) {
 //   非 silhouette：直接取標記角。
 //   silhouette：取「最高（最接近天花板）」的不透光材料邊角作為開口遮擋緣；
 //   同高時取最朝室內者（最易暴露光源）。不論該角在光源上下皆適用——光源高於
-//   遮擋緣即為眩光情形（由 analyzePoint 判定）。
+//   遮擋緣即為眩光情形（視線遮擋分析於 analyzeSide）。
 //   註：v1 啟發式，對極複雜剖面非嚴格精確，僅供參考。
 function getShieldPoint(cove, side, lightX, lightY) {
   const sh = cove.shield;
@@ -684,7 +689,7 @@ function getShieldPoint(cove, side, lightX, lightY) {
   let best = cands[0];
   for (const p of cands) {
     if (p.y > best.y + 1e-6) best = p;                          // 更高（世界 y 大 = 近天花板）
-    else if (Math.abs(p.y - best.y) < 1e-6 && inward * (p.x - best.x) < 0) best = p; // 同高取更靠牆（槽側，較保守）
+    else if (Math.abs(p.y - best.y) < 1e-6 && inward * (p.x - best.x) > 0) best = p; // 同高取更朝室內（最易暴露光源）
   }
   return { x: best.x, y: best.y, hasCutoff: !!sh.hasCutoff };
 }
@@ -811,25 +816,52 @@ function drawDragBadge() {
   ctx.restore();
 }
 
-// ── 遮光截止角虛線 ──────────────────────────────────────────────
+// ── 遮光截止角虛線（光源向上、經實際掠射點延伸至天花）────────────────
+function firstOpaqueToward(ox, oy, tx, ty, scene, box) {
+  const dx = tx - ox, dy = ty - oy;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len, uy = dy / len;
+  let x = ox, y = oy, guard = 0;
+  while (guard++ < 24) {
+    const hit = findHit(x, y, ux, uy, scene, null);
+    if (!hit || hit.pass) return null;
+    if (inGlareBox(hit.x, hit.y, box) || (hit.transparency || 0) > 0) {
+      x = hit.x + ux * 1e-4;
+      y = hit.y + uy * 1e-4;
+      continue;
+    }
+    return hit;
+  }
+  return null;
+}
+
 function drawCriticalAngle(scene, side) {
   const cove = side === 'L' ? scene.leftCove : scene.rightCove;
   if (!cove) return;
-  const { H } = scene;
+  const { H, W } = scene;
   const { lx: lightX, ly: lightY } = cove.light;
-  const sp = getShieldPoint(cove, side, lightX, lightY);
-  if (!sp.hasCutoff) return;
-  // 遮光臨界點取遮擋邊緣（含材料厚度偏移）
-  const baffleX = sp.x;
-  const baffleTop = sp.y;
-  if (lightY >= baffleTop) return;
-
-  const ddx = baffleX - lightX, ddy = baffleTop - lightY;
-  const len  = Math.sqrt(ddx * ddx + ddy * ddy);
-  if (len < 1e-6) return;
-  const nx = ddx / len, ny = ddy / len;
-  const tCeil = (H - baffleTop) / ny;
-  const xEnd  = baffleX + nx * tCeil;
+  const box = glareBox(lightX, lightY, side);
+  const inward = side === 'L' ? 1 : -1;
+  // 只取「在光源之上、朝室內」且光線先碰到該點的頂點，避免把底板近牆高角
+  // 或斜向燈具外輪廓的隨機高點當成天花截止角。
+  const cands = (cove.shield.candidates || []).filter(p =>
+    p.y > lightY + 1e-4 && inward * (p.x - lightX) > 1e-4);
+  let best = null;
+  for (const p of cands) {
+    const hit = firstOpaqueToward(lightX, lightY, p.x, p.y, scene, box);
+    if (!hit) continue;
+    if (Math.hypot(hit.x - p.x, hit.y - p.y) > 0.02) continue;
+    const ddx = p.x - lightX, ddy = p.y - lightY;
+    const len = Math.hypot(ddx, ddy);
+    if (len < 1e-6 || ddy <= 1e-6) continue;
+    const nx = ddx / len, ny = ddy / len;
+    const tCeil = (H - p.y) / ny;
+    if (tCeil <= 0) continue;
+    const xEnd = p.x + nx * tCeil;
+    const wallDist = side === 'L' ? xEnd : W - xEnd;
+    if (!best || wallDist < best.wallDist) best = { p, xEnd, wallDist };
+  }
+  if (!best) return;
 
   ctx.save();
   ctx.setLineDash([5, 5]);
@@ -837,8 +869,8 @@ function drawCriticalAngle(scene, side) {
   ctx.lineWidth = 1.2;
   ctx.beginPath();
   ctx.moveTo(mx(lightX), my(lightY));
-  ctx.lineTo(mx(baffleX), my(baffleTop));
-  ctx.lineTo(mx(xEnd), my(H));
+  ctx.lineTo(mx(best.p.x), my(best.p.y));
+  ctx.lineTo(mx(best.xEnd), my(H));
   ctx.stroke();
   ctx.restore();
 }
@@ -922,65 +954,38 @@ function drawGlareHandles(scene, side) {
 // ══ 眩光分析 ══════════════════════════════════════════════════════
 /**
  * 分析單側燈槽在指定眼高的眩光狀況。
- * 遮擋邊緣 = 擋板頂端（有啟用擋板時）或底板前緣（無擋板時，下檔板仍遮視角）。
- * 透過光源與該邊緣的連線、再與眼高線求交點，得到眩光/安全分界 x。
- * 回傳的 baffleTop 欄位實為「遮擋邊緣高度」(edgeY)。
+ * 對燈具裸露邊界四個角沿眼高線做實際視線遮擋測試（非「最高角」啟發式），
+ * 找隱藏↔可見轉換點。回傳的 baffleX/baffleTop 為繪圖用的實際掠射點。
  * status:
  *   'shielded'  完全遮蔽（室內任何距離都看不到光源）
  *   'allGlare'  全區可見
  *   'safeNear'  近牆安全、超過 xGraze 後可見光源
  *   'safeFar'   遠處安全、未達 xGraze 時可見光源
  */
-// 針對單一光源點計算遮蔽狀態（眩光分析核心）
-function analyzePoint(px, py, baffleX, edgeY, eyeH) {
-  const eAbove = eyeH > edgeY;
-  const lAbove = py   > edgeY;
-  if (!eAbove && !lAbove) return { status: 'shielded', xGraze: null };
-  if (eAbove && lAbove)   return { status: 'allGlare', xGraze: null };
-  // 光源恰好齊平遮擋邊緣：掠射線水平。眼高在邊緣上方→全區可見；在下方→完全遮蔽。
-  // （此時 lAbove 僅因浮點誤差而與 eAbove 不一致，須以眼高為準，否則會誤判全區可見。）
-  if (Math.abs(edgeY - py) < 1e-6) return { status: eAbove ? 'allGlare' : 'shielded', xGraze: null };
-  const t = (eyeH - py) / (edgeY - py);
-  return { status: lAbove ? 'safeNear' : 'safeFar', xGraze: px + t * (baffleX - px) };
+function makeGlareOccluded(scene, box) {
+  return (ax, ay, bx, by) => segmentOccluded(
+    ax, ay, bx, by,
+    (ox, oy, dx, dy) => findHit(ox, oy, dx, dy, scene, null),
+    { skipHit: (hit) => inGlareBox(hit.x, hit.y, box) },
+  );
 }
 
-function analyzeSide(cove, side, W, eyeH) {
+function analyzeSide(scene, cove, side, eyeH) {
+  const { W } = scene;
   const { lx: lightX, ly: lightY } = cove.light;
-
-  // 遮擋邊緣：由樣式決定（classic 為擋板槽側頂角或底板前緣，含材料厚度偏移）。
-  const sp = getShieldPoint(cove, side, lightX, lightY);
-  const baffleX = sp.x;
-  const edgeY = sp.y;
-
-  // 燈具裸露邊界：矩形範圍，基準角（光源所在角）可設定。
-  // 把光源視為一個矩形範圍，眩光取「最易被看見」的角（眩光區最大）作為判定。
   const box = glareBox(lightX, lightY, side);
-  const corners = [
-    { x: box.x0, y: box.y0 }, { x: box.x1, y: box.y0 },
-    { x: box.x0, y: box.y1 }, { x: box.x1, y: box.y1 },
-  ];
-  // allGlare / shielded 時的繪圖代表點取矩形中心
-  const rep = { x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2 };
+  const occluded = makeGlareOccluded(scene, box);
+  const r = analyzeGlareBox(box, eyeH, side, W, occluded);
 
-  let anyAll = false, best = null, bestCorner = null;
-  for (const c of corners) {
-    const r = analyzePoint(c.x, c.y, baffleX, edgeY, eyeH);
-    if (r.status === 'allGlare') { anyAll = true; continue; }
-    if (r.status === 'shielded') continue;
-    // 取「眩光區最大（最裸露）」的臨界角。眩光條件依 side/status 不同，
-    // 較小 xGraze 較裸露者：左側 safeNear、右側 safeFar；其餘較大 xGraze 較裸露。
-    if (!best) { best = r; bestCorner = c; continue; }
-    const smallerWorse = (side === 'L' && r.status === 'safeNear') ||
-                         (side === 'R' && r.status === 'safeFar');
-    const worse = smallerWorse ? (r.xGraze < best.xGraze) : (r.xGraze > best.xGraze);
-    if (worse) { best = r; bestCorner = c; }
+  let baffleX = r.lightX, baffleTop = r.lightY;
+  if (r.xGraze != null) {
+    const hit = firstOpaqueToward(r.lightX, r.lightY, r.xGraze, eyeH, scene, box);
+    if (hit) { baffleX = hit.x; baffleTop = hit.y; }
+  } else {
+    const sp = getShieldPoint(cove, side, lightX, lightY);
+    baffleX = sp.x; baffleTop = sp.y;
   }
-
-  if (anyAll)
-    return { status: 'allGlare', lightX: rep.x, lightY: rep.y, baffleX, baffleTop: edgeY, xGraze: null, box };
-  if (!best)
-    return { status: 'shielded', lightX: rep.x, lightY: rep.y, baffleX, baffleTop: edgeY, xGraze: null, box };
-  return { status: best.status, lightX: bestCorner.x, lightY: bestCorner.y, baffleX, baffleTop: edgeY, xGraze: best.xGraze, box };
+  return { ...r, baffleX, baffleTop };
 }
 
 // ══ 眼睛視角 / 安全距離 ═══════════════════════════════════════════
@@ -1003,15 +1008,12 @@ function drawEye(scene) {
 
   for (const [cove, side] of [[scene.leftCove, 'L'], [scene.rightCove, 'R']]) {
     if (!cove) continue;
-    const a   = analyzeSide(cove, side, W, eyeH);
+    const a   = analyzeSide(scene, cove, side, eyeH);
     const tag = side === 'L' ? '左側' : '右側';
 
-    // 觀察者目前位置是否直視光源
-    let seen = false;
-    if      (a.status === 'allGlare') seen = true;
-    else if (a.status === 'shielded') seen = false;
-    else if (a.status === 'safeNear') seen = side === 'L' ? eyeX > a.xGraze : eyeX < a.xGraze;
-    else if (a.status === 'safeFar')  seen = side === 'L' ? eyeX < a.xGraze : eyeX > a.xGraze;
+    // 觀察者目前位置是否直視光源（實際視線，非單點啟發式）
+    const occluded = makeGlareOccluded(scene, a.box);
+    const seen = !occluded(eyeX, eyeH, a.lightX, a.lightY);
 
     // 觀察者視線
     ctx.save();
