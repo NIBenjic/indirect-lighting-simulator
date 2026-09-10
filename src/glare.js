@@ -5,6 +5,9 @@
 // 會報出數公尺的假安全距離（例如 2767 mm），或把「最高角在光源之上」
 // 誤判成完全遮蔽。正確做法：對燈具裸露邊界的每個角，沿眼高線做實際
 // 視線遮擋測試，找隱藏↔可見的轉換點。
+//
+// 裸露邊界是軸對齊 AABB。光源「自體旋轉」只轉發光方向（照度），不轉此框；
+// 否則斜向四角會多出穿過空區的假掠射線。
 
 export const GLARE_NEAR = 0.003; // 3mm：光源貼面時忽略末端自交
 
@@ -40,23 +43,13 @@ export function segmentOccluded(ax, ay, bx, by, hitFn, opts = {}) {
   return false;
 }
 
-// 把世界點轉回裸露框的未旋轉座標（有 phi 時繞 ox,oy 反轉）。
-function toBoxLocal(x, y, box) {
-  if (!box || !box.phi || Math.abs(box.phi) < 1e-12 || box.ox == null) return { x, y };
-  const dx = x - box.ox, dy = y - box.oy;
-  const c = Math.cos(-box.phi), s = Math.sin(-box.phi);
-  return { x: box.ox + dx * c - dy * s, y: box.oy + dx * s + dy * c };
-}
-
 export function inGlareBox(x, y, box, pad = 0.002) {
   if (!box) return false;
-  const p = toBoxLocal(x, y, box);
-  return p.x >= box.x0 - pad && p.x <= box.x1 + pad && p.y >= box.y0 - pad && p.y <= box.y1 + pad;
+  return x >= box.x0 - pad && x <= box.x1 + pad && y >= box.y0 - pad && y <= box.y1 + pad;
 }
 
-// 分析用的四個角：旋轉後的 corners，否則軸對齊 AABB。
+// 軸對齊 AABB 四角（忽略任何 phi / corners；自體旋轉不進眩光判定）。
 export function glareCorners(box) {
-  if (box && box.corners && box.corners.length) return box.corners;
   if (!box) return [];
   return [
     { x: box.x0, y: box.y0 }, { x: box.x1, y: box.y0 },
@@ -152,7 +145,7 @@ export function combineGlareCorners(results, side) {
   return { status: best.status, xGraze: best.xGraze, corner: best.corner || null };
 }
 
-// 從四個角組出單側結論。box = {x0,x1,y0,y1} 或含 corners 的旋轉框。
+// 從四個角組出單側結論。box = {x0,x1,y0,y1}（軸對齊）。
 export function analyzeGlareBox(box, eyeH, side, W, occluded) {
   const corners = glareCorners(box);
   const results = corners.map(c => {
@@ -160,9 +153,7 @@ export function analyzeGlareBox(box, eyeH, side, W, occluded) {
     return { ...r, corner: c };
   });
   const comb = combineGlareCorners(results, side);
-  const rep = corners.length
-    ? { x: corners.reduce((s, c) => s + c.x, 0) / corners.length, y: corners.reduce((s, c) => s + c.y, 0) / corners.length }
-    : { x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2 };
+  const rep = { x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2 };
   const used = comb.corner || rep;
   return {
     status: comb.status,

@@ -1,6 +1,6 @@
 {
   "name": "indirect-lighting-simulator",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "間接照明模擬器",
   "type": "module",
   "scripts": {

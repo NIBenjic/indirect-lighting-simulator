@@ -80,10 +80,10 @@ function toWorld(u, d, side, W, H) {
   return { x: side === 'L' ? u : W - u, y: H - d };
 }
 
-// 燈具裸露邊界（公尺）：以光源為錨，依水平/垂直基準延伸，再繞掛點隨自體旋轉。
+// 燈具裸露邊界（公尺）：以光源為錨，依水平/垂直基準延伸。軸對齊 AABB。
 //   hAnchor: 'wall' 靠牆（向室內延伸）/ 'center' 置中 / 'interior' 靠室內（向牆延伸）
 //   vAnchor: 'top' 上（向下延伸）/ 'center' 置中 / 'bottom' 下（向上延伸）
-// 回傳未旋轉 AABB (x0,x1,y0,y1) + 旋轉原點/角 + 世界座標四角。
+// 自體旋轉只轉發光方向，不轉此框。
 function glareBox(lx, ly, side) {
   const gW = Math.max(0, S.glare.width), gH = Math.max(0, S.glare.height);
   const inward = side === 'L' ? 1 : -1;   // 朝室內的 x 方向
@@ -97,18 +97,7 @@ function glareBox(lx, ly, side) {
   if (S.glare.vAnchor === 'top')         { y0 = ly - gH; y1 = ly; }
   else if (S.glare.vAnchor === 'bottom') { y0 = ly;      y1 = ly + gH; }
   else                                   { y0 = ly - gH / 2; y1 = ly + gH / 2; }
-  // 右側發光方向鏡像，框跟著轉（左 +θ、右 −θ）
-  const phi = inward * (S.cove.light.rotationAngle || 0) * Math.PI / 180;
-  const rot = (x, y) => {
-    if (Math.abs(phi) < 1e-12) return { x, y };
-    const dx = x - lx, dy = y - ly;
-    const c = Math.cos(phi), s = Math.sin(phi);
-    return { x: lx + dx * c - dy * s, y: ly + dx * s + dy * c };
-  };
-  const corners = [
-    rot(x0, y0), rot(x1, y0), rot(x1, y1), rot(x0, y1),
-  ];
-  return { x0, x1, y0, y1, ox: lx, oy: ly, phi, corners };
+  return { x0, x1, y0, y1 };
 }
 
 // 光源顯示色：色相完全依色溫（與 kelvinToColor 一致），亮度僅影響
@@ -918,21 +907,16 @@ function drawGlareBox(scene, side) {
   const gW = Math.max(0, S.glare.width), gH = Math.max(0, S.glare.height);
   if (gW <= 0 && gH <= 0) return;
   const { lx, ly } = cove.light;
-  const box = glareBox(lx, ly, side);
-  const pts = box.corners;
-  if (!pts || pts.length < 2) return;
+  const { x0, x1, y0, y1 } = glareBox(lx, ly, side);
   const { r8, g8, b8 } = lightDisplayColor();
+  const px = mx(x0), py = my(y1), pw = (x1 - x0) * _scale, ph = (y1 - y0) * _scale;
   ctx.save();
   ctx.fillStyle = `rgba(${r8},${g8},${b8},0.16)`;
+  ctx.fillRect(px, py, pw, ph);
   ctx.setLineDash([4, 3]);
   ctx.lineWidth = 1.2;
   ctx.strokeStyle = `rgba(${r8},${g8},${b8},0.7)`;
-  ctx.beginPath();
-  ctx.moveTo(mx(pts[0].x), my(pts[0].y));
-  for (let i = 1; i < pts.length; i++) ctx.lineTo(mx(pts[i].x), my(pts[i].y));
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
+  ctx.strokeRect(px, py, pw, ph);
   ctx.restore();
 }
 
@@ -953,21 +937,11 @@ function glareHandles(side) {
   if (vCenter) yEdges = [ { y: b.y1, s: 1 }, { y: b.y0, s: -1 } ];
   else if (S.glare.vAnchor === 'top') yEdges = [ { y: b.y0, s: -1 } ];
   else yEdges = [ { y: b.y1, s: 1 } ];   // bottom：向上延伸
-  const phi = b.phi || 0;
-  const rot = (x, y) => {
-    if (Math.abs(phi) < 1e-12) return { x, y };
-    const dx = x - lw.x, dy = y - lw.y;
-    const c = Math.cos(phi), s = Math.sin(phi);
-    return { x: lw.x + dx * c - dy * s, y: lw.y + dx * s + dy * c };
-  };
   const out = [];
-  for (const xe of xEdges) { const p = rot(xe.x, yMid); out.push({ kind: 'glareW', x: p.x, y: p.y, sH: xe.s, sV: 0 }); }
-  for (const ye of yEdges) { const p = rot(xMid, ye.y); out.push({ kind: 'glareH', x: p.x, y: p.y, sH: 0, sV: ye.s }); }
-  for (const xe of xEdges) for (const ye of yEdges) {
-    const p = rot(xe.x, ye.y);
-    out.push({ kind: 'glareWH', x: p.x, y: p.y, sH: xe.s, sV: ye.s });
-  }
-  return { lx: lw.x, ly: lw.y, handles: out, phi };
+  for (const xe of xEdges) out.push({ kind: 'glareW', x: xe.x, y: yMid, sH: xe.s, sV: 0 });
+  for (const ye of yEdges) out.push({ kind: 'glareH', x: xMid, y: ye.y, sH: 0, sV: ye.s });
+  for (const xe of xEdges) for (const ye of yEdges) out.push({ kind: 'glareWH', x: xe.x, y: ye.y, sH: xe.s, sV: ye.s });
+  return { lx: lw.x, ly: lw.y, handles: out };
 }
 // 眩光框縮放把手（僅「視角」分頁顯示/可拖曳）
 function drawGlareHandles(scene, side) {
@@ -2508,14 +2482,8 @@ function dragMove(sx, sy, mod) {
       const wx = (sx - _ox) / _scale, wy = (_oy - sy) / _scale;
       const fxp = S.cove.light.fixture, lw = toWorld(fxp.u, fxp.d, dragState.side, S.room.W, S.room.H);
       const snapC = v => clamp(Math.round(Math.max(0, v) / 0.001) * 0.001, 0, 0.5);   // 對齊滑桿 0~500mm / 1mm，夾在 0 以上
-      // 投影到燈具局部軸（含自體旋轉）：右側 φ 已鏡像
-      const phi = (dragState.side === 'L' ? 1 : -1) * (S.cove.light.rotationAngle || 0) * Math.PI / 180;
-      const dx = wx - lw.x, dy = wy - lw.y;
-      const c = Math.cos(phi), s = Math.sin(phi);
-      const localX = dx * c + dy * s;
-      const localY = -dx * s + dy * c;
-      if (dragState.sH) S.glare.width  = snapC(localX * dragState.sH * (S.glare.hAnchor === 'center' ? 2 : 1));
-      if (dragState.sV) S.glare.height = snapC(localY * dragState.sV * (S.glare.vAnchor === 'center' ? 2 : 1));
+      if (dragState.sH) S.glare.width  = snapC((wx - lw.x) * dragState.sH * (S.glare.hAnchor === 'center' ? 2 : 1));
+      if (dragState.sV) S.glare.height = snapC((wy - lw.y) * dragState.sV * (S.glare.vAnchor === 'center' ? 2 : 1));
       const setG = (id, val) => { const el = document.getElementById(id); if (el) el.value = Math.round(val * 1000);
         const vl = document.getElementById(id + '-val'); if (vl) vl.textContent = Math.round(val * 1000) + ' mm'; };
       setG('glare-width', S.glare.width); setG('glare-height', S.glare.height);
