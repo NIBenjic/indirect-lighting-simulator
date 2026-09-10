@@ -556,7 +556,7 @@
 
         <div class="section">
           <div class="section-title">眩光偵測（燈具裸露邊界）</div>
-          <div class="hint">在此分頁時，可直接於畫布上拖曳邊框把手調整大小。眩光依眼高線上的實際視線遮擋判定；請將邊界對齊真實發光面。光源「自體旋轉」只轉發光方向，不轉此框。</div>
+          <div class="hint">虛線矩形是燈具外框（眩光判定範圍）。橘色線是在設定眼高上、外框剛好被擋住／開始可見的臨界視線，不是從掛點出發。請將邊界對齊真實發光面。自體旋轉只轉發光方向，不轉此框。</div>
           <div class="control-row">
             <span class="control-label">邊界寬</span>
             <input type="range" id="glare-width" min="0" max="500" step="1" value="40">
@@ -594,10 +594,10 @@
           <div class="legend-block" id="legend-block">
             <div><span style="color:#fd0">━ 光源射線</span> 顏色隨色溫/亮度，依反光衰減</div>
             <div><span style="color:#fd0">● 光源位置</span> 光暈顏色隨色溫/亮度</div>
-            <div><span style="color:#f55">┄ 紅色視線</span> 觀察者直視光源（眩光）</div>
-            <div><span style="color:#4c4">┄ 綠色視線</span> 觀察者未直視光源（安全）</div>
-            <div><span style="color:#fa0">┄ 橘色虛線</span> 遮光截止角 / 安全距離</div>
-            <div><span style="color:#fd0">▢ 邊界框</span> 燈具裸露邊界（眩光判定範圍，隨色溫）</div>
+            <div><span style="color:#f55">┄ 紅色視線</span> 觀察者看得到燈具外框（眩光）</div>
+            <div><span style="color:#4c4">┄ 綠色視線</span> 觀察者看不到燈具外框（安全）</div>
+            <div><span style="color:#fa0">┄ 橘色虛線</span> 眼高臨界視線（外框開始可見的距離）</div>
+            <div><span style="color:#fd0">▢ 邊界框</span> 燈具外框（眩光判定範圍，隨色溫）</div>
             <div><span style="color:#4cf">● 藍色圓點</span> 觀察者眼睛位置</div>
             <div><span style="color:#bbb">┄ 眼高水平線</span> 觀察者眼睛高度（隨主題色）</div>
             <div style="margin-top:6px;border-top:1px solid #2e2e2e;padding-top:6px"><span style="color:#d7d2c3">▭ 天花板</span> 室內反光面（薄帶）</div>
@@ -711,7 +711,7 @@
 
     </div><!-- end panel-body -->
     <div id="panel-footer">
-      <div class="pf-app">間接照明模擬器 <span class="pf-ver">v2.0.3</span></div>
+      <div class="pf-app">間接照明模擬器 <span class="pf-ver">v2.0.4</span></div>
       <div class="pf-by">By <a href="mailto:tyy@richhonour.com">Ben Yang</a> · <a href="https://www.richhonour.com" target="_blank" rel="noopener">Richhonour</a></div>
     </div>
   </aside>

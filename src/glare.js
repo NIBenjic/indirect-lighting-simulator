@@ -57,6 +57,15 @@ export function glareCorners(box) {
   ];
 }
 
+// 從觀察點能否看到裸露框（燈具外框）的任一角。回傳第一個可見角，否則 null。
+export function boxVisibleFrom(x, y, box, occluded) {
+  if (!box) return null;
+  for (const c of glareCorners(box)) {
+    if (!occluded(x, y, c.x, c.y)) return c;
+  }
+  return null;
+}
+
 // 命中是否落在燈具體積內（裸露框或距掛點 < near）。照度直射須跳過自遮擋。
 export function hitIsFixture(hit, sources, near = 0.005) {
   if (!hit || !sources || !sources.length) return false;
@@ -146,6 +155,7 @@ export function combineGlareCorners(results, side) {
 }
 
 // 從四個角組出單側結論。box = {x0,x1,y0,y1}（軸對齊）。
+// 語意：在設定眼高上，裸露框（燈具外框）任一角都看不到的最遠／最近距離。
 export function analyzeGlareBox(box, eyeH, side, W, occluded) {
   const corners = glareCorners(box);
   const results = corners.map(c => {

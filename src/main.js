@@ -25,6 +25,7 @@ import {
 } from './core.js';
 import {
   analyzeGlareBox,
+  boxVisibleFrom,
   hitIsFixture,
   inGlareBox,
   segmentOccluded,
@@ -823,7 +824,7 @@ function drawDragBadge() {
   ctx.restore();
 }
 
-// ── 遮光截止角虛線（光源向上、經實際掠射點延伸至天花）────────────────
+// 沿 ox,oy → tx,ty 找第一個不透光命中（跳過裸露框與半透光）。供臨界視線標示掠射點。
 function firstOpaqueToward(ox, oy, tx, ty, scene, box) {
   const dx = tx - ox, dy = ty - oy;
   const len = Math.hypot(dx, dy) || 1;
@@ -840,46 +841,6 @@ function firstOpaqueToward(ox, oy, tx, ty, scene, box) {
     return hit;
   }
   return null;
-}
-
-function drawCriticalAngle(scene, side) {
-  const cove = side === 'L' ? scene.leftCove : scene.rightCove;
-  if (!cove) return;
-  const { H, W } = scene;
-  const { lx: lightX, ly: lightY } = cove.light;
-  const box = glareBox(lightX, lightY, side);
-  const inward = side === 'L' ? 1 : -1;
-  // 只取「在光源之上、朝室內」且光線先碰到該點的頂點，避免把底板近牆高角
-  // 或斜向燈具外輪廓的隨機高點當成天花截止角。
-  const cands = (cove.shield.candidates || []).filter(p =>
-    p.y > lightY + 1e-4 && inward * (p.x - lightX) > 1e-4);
-  let best = null;
-  for (const p of cands) {
-    const hit = firstOpaqueToward(lightX, lightY, p.x, p.y, scene, box);
-    if (!hit) continue;
-    if (Math.hypot(hit.x - p.x, hit.y - p.y) > 0.02) continue;
-    const ddx = p.x - lightX, ddy = p.y - lightY;
-    const len = Math.hypot(ddx, ddy);
-    if (len < 1e-6 || ddy <= 1e-6) continue;
-    const nx = ddx / len, ny = ddy / len;
-    const tCeil = (H - p.y) / ny;
-    if (tCeil <= 0) continue;
-    const xEnd = p.x + nx * tCeil;
-    const wallDist = side === 'L' ? xEnd : W - xEnd;
-    if (!best || wallDist < best.wallDist) best = { p, xEnd, wallDist };
-  }
-  if (!best) return;
-
-  ctx.save();
-  ctx.setLineDash([5, 5]);
-  ctx.strokeStyle = `rgba(255,170,0,0.45)`;
-  ctx.lineWidth = 1.2;
-  ctx.beginPath();
-  ctx.moveTo(mx(lightX), my(lightY));
-  ctx.lineTo(mx(best.p.x), my(best.p.y));
-  ctx.lineTo(mx(best.xEnd), my(H));
-  ctx.stroke();
-  ctx.restore();
 }
 
 // ── 光源光暈 ────────────────────────────────────────────────────
@@ -961,8 +922,8 @@ function drawGlareHandles(scene, side) {
 // ══ 眩光分析 ══════════════════════════════════════════════════════
 /**
  * 分析單側燈槽在指定眼高的眩光狀況。
- * 對燈具裸露邊界四個角沿眼高線做實際視線遮擋測試（非「最高角」啟發式），
- * 找隱藏↔可見轉換點。回傳的 baffleX/baffleTop 為繪圖用的實際掠射點。
+ * 對燈具裸露邊界（外框）四個角沿眼高線做實際視線遮擋測試，
+ * 找「外框開始可見」的轉換點。回傳的 baffleX/baffleTop 為繪圖用的實際掠射點。
  * status:
  *   'shielded'  完全遮蔽（室內任何距離都看不到光源）
  *   'allGlare'  全區可見
@@ -1018,22 +979,25 @@ function drawEye(scene) {
     const a   = analyzeSide(scene, cove, side, eyeH);
     const tag = side === 'L' ? '左側' : '右側';
 
-    // 觀察者目前位置是否直視光源（實際視線，非單點啟發式）
+    // 觀察者目前位置是否看得到燈具外框（裸露框任一角）
     const occluded = makeGlareOccluded(scene, a.box);
-    const seen = !occluded(eyeX, eyeH, a.lightX, a.lightY);
+    const visCorner = boxVisibleFrom(eyeX, eyeH, a.box, occluded);
+    const seen = !!visCorner;
+    const aim = visCorner || { x: a.lightX, y: a.lightY };
 
-    // 觀察者視線
+    // 觀察者視線：眼睛 → 外框（可見角或最裸露角），不是掛點
     ctx.save();
     ctx.setLineDash([4, 4]);
     ctx.strokeStyle = seen ? 'rgba(255,70,70,0.7)' : 'rgba(60,200,60,0.55)';
     ctx.lineWidth = 1.4;
     ctx.beginPath();
     ctx.moveTo(ex, ey);
-    ctx.lineTo(mx(a.lightX), my(a.lightY));
+    ctx.lineTo(mx(aim.x), my(aim.y));
     ctx.stroke();
     ctx.restore();
 
-    // 安全距離臨界線（光源 → 擋板頂端 → 眼高交點）與刻度
+    // 眼高臨界視線：外框最裸露角 → 實際掠射點 → 眼高交點。
+    // 表示在設定眼高上，燈具外框剛好開始可見的最遠／最近距離。
     if (a.xGraze !== null && a.xGraze >= 0 && a.xGraze <= W) {
       const gx = mx(a.xGraze);
       ctx.save();
@@ -1165,10 +1129,6 @@ function redraw() {
   // 燈槽幾何
   drawCoveGeo(scene, 'L');
   drawCoveGeo(scene, 'R');
-
-  // 遮光截止角（在射線前面，作為背景參考）
-  drawCriticalAngle(scene, 'L');
-  drawCriticalAngle(scene, 'R');
 
   // 射線（最主要的視覺元素）
   drawRays(scene, 'L');
