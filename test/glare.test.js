@@ -158,26 +158,25 @@ describe('analyzeGlareBox', () => {
   });
 });
 
-describe('rotated glare box', () => {
-  it('inGlareBox inverse-rotates so a tilted corner is inside and a world-AABB corner is not', () => {
-    const phi = Math.PI / 4;
+describe('axis-aligned glare box (rotation does not tilt the box)', () => {
+  it('inGlareBox ignores phi / corners and stays axis-aligned', () => {
     const box = {
       x0: 0.09, x1: 0.13, y0: 2.78, y1: 2.82,
-      ox: 0.09, oy: 2.80, phi,
+      ox: 0.09, oy: 2.80, phi: Math.PI / 4,
+      corners: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }],
     };
-    // 未旋轉時的右上角，旋轉 45° 後應仍算在框內
-    const c = Math.cos(phi), s = Math.sin(phi);
-    const dx = 0.13 - 0.09, dy = 2.82 - 2.80;
+    expect(inGlareBox(0.11, 2.80, box)).toBe(true);
+    expect(inGlareBox(0.20, 2.80, box)).toBe(false);
+    // 旋轉後會落到框外的點，AABB 仍以未旋轉座標判定
+    const c = Math.cos(Math.PI / 4), s = Math.sin(Math.PI / 4);
+    const dx = 0.04, dy = 0.02;
     const tilted = { x: 0.09 + dx * c - dy * s, y: 2.80 + dx * s + dy * c };
-    expect(inGlareBox(tilted.x, tilted.y, box)).toBe(true);
-    // 未旋轉 AABB 的右上（世界）在旋轉後已離開框
-    expect(inGlareBox(0.13, 2.82, box)).toBe(false);
+    expect(inGlareBox(tilted.x, tilted.y, box)).toBe(false);
   });
 
-  it('glareCorners prefers the rotated corners list', () => {
+  it('glareCorners always returns the AABB corners', () => {
     const corners = [{ x: 1, y: 2 }, { x: 3, y: 2 }, { x: 3, y: 4 }, { x: 1, y: 4 }];
-    expect(glareCorners({ x0: 0, x1: 1, y0: 0, y1: 1, corners })).toEqual(corners);
-    expect(glareCorners({ x0: 0, x1: 1, y0: 2, y1: 3 })).toEqual([
+    expect(glareCorners({ x0: 0, x1: 1, y0: 2, y1: 3, corners })).toEqual([
       { x: 0, y: 2 }, { x: 1, y: 2 }, { x: 0, y: 3 }, { x: 1, y: 3 },
     ]);
   });
