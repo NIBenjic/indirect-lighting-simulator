@@ -7,6 +7,7 @@ import {
   emissionWeight,
   encodeCompact,
   kelvinToColor,
+  polySelfIntersects,
   pointToSegFF,
   solveRadiosity,
   splitSegment,
@@ -122,6 +123,41 @@ describe('custom polygon validation', () => {
     expect(validateCustomPoints([{ u: 0, d: 0 }, { u: 0.1, d: 0 }, { u: Infinity, d: 0.1 }]).ok).toBe(false);
     expect(validateCustomPoints([{ u: 0, d: 0 }, { u: 0.1, d: 0 }, { u: 0.1, d: 0.1 }, { u: 0.1, d: 0 }, { u: 0, d: 0.1 }]).ok).toBe(false);
     expect(validateCustomPoints([{ u: 0, d: 0 }, { u: 0.2, d: 0.2 }, { u: 0, d: 0.2 }, { u: 0.2, d: 0 }]).ok).toBe(false);
+  });
+});
+
+describe('polySelfIntersects', () => {
+  it('accepts a convex quad', () => {
+    expect(polySelfIntersects([
+      { u: 0, d: 0 }, { u: 0.2, d: 0 }, { u: 0.2, d: 0.2 }, { u: 0, d: 0.2 },
+    ])).toBe(false);
+  });
+
+  it('detects a bowtie proper crossing', () => {
+    expect(polySelfIntersects([
+      { u: 0, d: 0 }, { u: 0.2, d: 0.2 }, { u: 0, d: 0.2 }, { u: 0.2, d: 0 },
+    ])).toBe(true);
+  });
+
+  it('detects a T-junction onto a non-adjacent edge', () => {
+    // (0.05,0) 落在底邊 (0,0)–(0.2,0) 內部
+    expect(polySelfIntersects([
+      { u: 0, d: 0 }, { u: 0.2, d: 0 }, { u: 0.2, d: 0.15 }, { u: 0.05, d: 0 },
+    ])).toBe(true);
+  });
+
+  it('detects collinear overlap of non-adjacent edges', () => {
+    // 底邊 (0,0)–(0.3,0) 與 (0.1,0)–(0.2,0) 共線重疊
+    expect(polySelfIntersects([
+      { u: 0, d: 0 }, { u: 0.3, d: 0 }, { u: 0.3, d: 0.12 },
+      { u: 0.2, d: 0 }, { u: 0.1, d: 0 }, { u: 0, d: 0.12 },
+    ])).toBe(true);
+  });
+
+  it('detects adjacent backtracking along the same segment', () => {
+    expect(polySelfIntersects([
+      { u: 0, d: 0 }, { u: 0.2, d: 0 }, { u: 0.1, d: 0 }, { u: 0.1, d: 0.15 },
+    ])).toBe(true);
   });
 });
 

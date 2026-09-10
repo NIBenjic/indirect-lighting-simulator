@@ -3,6 +3,9 @@ import {
   analyzeGlareBox,
   analyzeLuminousPoint,
   combineGlareCorners,
+  glareCorners,
+  hitIsFixture,
+  inGlareBox,
   segmentOccluded,
 } from '../src/glare.js';
 
@@ -152,5 +155,38 @@ describe('analyzeGlareBox', () => {
     expect(r.status).toBe('safeNear');
     expect(r.lightX).toBeGreaterThanOrEqual(box.x0);
     expect(r.lightX).toBeLessThanOrEqual(box.x1);
+  });
+});
+
+describe('rotated glare box', () => {
+  it('inGlareBox inverse-rotates so a tilted corner is inside and a world-AABB corner is not', () => {
+    const phi = Math.PI / 4;
+    const box = {
+      x0: 0.09, x1: 0.13, y0: 2.78, y1: 2.82,
+      ox: 0.09, oy: 2.80, phi,
+    };
+    // 未旋轉時的右上角，旋轉 45° 後應仍算在框內
+    const c = Math.cos(phi), s = Math.sin(phi);
+    const dx = 0.13 - 0.09, dy = 2.82 - 2.80;
+    const tilted = { x: 0.09 + dx * c - dy * s, y: 2.80 + dx * s + dy * c };
+    expect(inGlareBox(tilted.x, tilted.y, box)).toBe(true);
+    // 未旋轉 AABB 的右上（世界）在旋轉後已離開框
+    expect(inGlareBox(0.13, 2.82, box)).toBe(false);
+  });
+
+  it('glareCorners prefers the rotated corners list', () => {
+    const corners = [{ x: 1, y: 2 }, { x: 3, y: 2 }, { x: 3, y: 4 }, { x: 1, y: 4 }];
+    expect(glareCorners({ x0: 0, x1: 1, y0: 0, y1: 1, corners })).toEqual(corners);
+    expect(glareCorners({ x0: 0, x1: 1, y0: 2, y1: 3 })).toEqual([
+      { x: 0, y: 2 }, { x: 1, y: 2 }, { x: 0, y: 3 }, { x: 1, y: 3 },
+    ]);
+  });
+
+  it('hitIsFixture treats glare-box hits and near-source hits as fixture body', () => {
+    const box = { x0: 0.09, x1: 0.13, y0: 2.78, y1: 2.82 };
+    const sources = [{ lx: 0.09, ly: 2.80, box }];
+    expect(hitIsFixture({ x: 0.11, y: 2.80 }, sources)).toBe(true);
+    expect(hitIsFixture({ x: 0.09, y: 2.801 }, sources)).toBe(true);
+    expect(hitIsFixture({ x: 1, y: 1.65 }, sources)).toBe(false);
   });
 });

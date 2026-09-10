@@ -42,23 +42,50 @@ export function validateCustomPoints(pts) {
   return { ok:true, points: D };
 }
 
-// 非相鄰邊線段相交偵測（封閉多邊形）
+// 非相鄰邊線段相交偵測（封閉多邊形）；含 T 接與共線重疊（舊版只抓嚴格交叉）。
 export function polySelfIntersects(P) {
   const n = P.length;
-  const seg = (i) => [P[i], P[(i+1)%n]];
-  const cross = (o,a,b) => (a.u-o.u)*(b.d-o.d) - (a.d-o.d)*(b.u-o.u);
-  const inter = (p1,p2,p3,p4) => {
-    const d1=cross(p3,p4,p1), d2=cross(p3,p4,p2), d3=cross(p1,p2,p3), d4=cross(p1,p2,p4);
-    return ((d1>0&&d2<0)||(d1<0&&d2>0)) && ((d3>0&&d4<0)||(d3<0&&d4>0));
+  const EPS = 1e-9;
+  const cross = (o, a, b) => (a.u - o.u) * (b.d - o.d) - (a.d - o.d) * (b.u - o.u);
+  const nearly = (p, q) => Math.hypot(p.u - q.u, p.d - q.d) < 1e-9;
+  // p 在 a–b 開區間上（共線且非端點）
+  const interiorOnSeg = (a, b, p) => {
+    if (Math.abs(cross(a, b, p)) > EPS) return false;
+    if (nearly(p, a) || nearly(p, b)) return false;
+    const minU = Math.min(a.u, b.u) - EPS, maxU = Math.max(a.u, b.u) + EPS;
+    const minD = Math.min(a.d, b.d) - EPS, maxD = Math.max(a.d, b.d) + EPS;
+    return p.u >= minU && p.u <= maxU && p.d >= minD && p.d <= maxD;
   };
-  for (let i=0;i<n;i++) for (let j=i+1;j<n;j++) {
-    if (i===j) continue;
-    if (j===(i+1)%n || i===(j+1)%n) continue; // 相鄰邊
-    const [a,b]=seg(i), [c,d]=seg(j);
-    if (inter(a,b,c,d)) return true;
+  const projOverlap = (a, b, c, d) => {
+    const useU = Math.abs(b.u - a.u) >= Math.abs(b.d - a.d);
+    const A = useU ? [a.u, b.u] : [a.d, b.d];
+    const B = useU ? [c.u, d.u] : [c.d, d.d];
+    const lo = Math.max(Math.min(A[0], A[1]), Math.min(B[0], B[1]));
+    const hi = Math.min(Math.max(A[0], A[1]), Math.max(B[0], B[1]));
+    return hi - lo > EPS;                               // 正長度重疊（共享端點不算）
+  };
+  const segsHit = (a, b, c, d) => {
+    const d1 = cross(c, d, a), d2 = cross(c, d, b), d3 = cross(a, b, c), d4 = cross(a, b, d);
+    const proper = ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+                   ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+    if (proper) return true;
+    if (Math.abs(d1) <= EPS && Math.abs(d2) <= EPS) return projOverlap(a, b, c, d);
+    return interiorOnSeg(c, d, a) || interiorOnSeg(c, d, b) ||
+           interiorOnSeg(a, b, c) || interiorOnSeg(a, b, d);
+  };
+  for (let i = 0; i < n; i++) {
+    const a = P[i], b = P[(i + 1) % n];
+    // 相鄰邊若共線折返（沿同一線來回）也算自交
+    const cAdj = P[(i + 2) % n];
+    if (interiorOnSeg(a, b, cAdj) || interiorOnSeg(b, cAdj, a)) return true;
+    for (let j = i + 1; j < n; j++) {
+      if (j === (i + 1) % n || i === (j + 1) % n) continue;
+      if (segsHit(a, b, P[j], P[(j + 1) % n])) return true;
+    }
   }
   return false;
 }
+
 
 // 驗證 form 結構（匯入/套用前）→ { ok, error }
 export function validateForm(form) {

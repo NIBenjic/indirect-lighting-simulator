@@ -40,9 +40,38 @@ export function segmentOccluded(ax, ay, bx, by, hitFn, opts = {}) {
   return false;
 }
 
+// 把世界點轉回裸露框的未旋轉座標（有 phi 時繞 ox,oy 反轉）。
+function toBoxLocal(x, y, box) {
+  if (!box || !box.phi || Math.abs(box.phi) < 1e-12 || box.ox == null) return { x, y };
+  const dx = x - box.ox, dy = y - box.oy;
+  const c = Math.cos(-box.phi), s = Math.sin(-box.phi);
+  return { x: box.ox + dx * c - dy * s, y: box.oy + dx * s + dy * c };
+}
+
 export function inGlareBox(x, y, box, pad = 0.002) {
   if (!box) return false;
-  return x >= box.x0 - pad && x <= box.x1 + pad && y >= box.y0 - pad && y <= box.y1 + pad;
+  const p = toBoxLocal(x, y, box);
+  return p.x >= box.x0 - pad && p.x <= box.x1 + pad && p.y >= box.y0 - pad && p.y <= box.y1 + pad;
+}
+
+// 分析用的四個角：旋轉後的 corners，否則軸對齊 AABB。
+export function glareCorners(box) {
+  if (box && box.corners && box.corners.length) return box.corners;
+  if (!box) return [];
+  return [
+    { x: box.x0, y: box.y0 }, { x: box.x1, y: box.y0 },
+    { x: box.x0, y: box.y1 }, { x: box.x1, y: box.y1 },
+  ];
+}
+
+// 命中是否落在燈具體積內（裸露框或距掛點 < near）。照度直射須跳過自遮擋。
+export function hitIsFixture(hit, sources, near = 0.005) {
+  if (!hit || !sources || !sources.length) return false;
+  for (const s of sources) {
+    if (s.box && inGlareBox(hit.x, hit.y, s.box)) return true;
+    if (s.lx != null && Math.hypot(hit.x - s.lx, hit.y - s.ly) < near) return true;
+  }
+  return false;
 }
 
 /**
@@ -123,18 +152,17 @@ export function combineGlareCorners(results, side) {
   return { status: best.status, xGraze: best.xGraze, corner: best.corner || null };
 }
 
-// 從四個角組出單側結論。box = {x0,x1,y0,y1}。
+// 從四個角組出單側結論。box = {x0,x1,y0,y1} 或含 corners 的旋轉框。
 export function analyzeGlareBox(box, eyeH, side, W, occluded) {
-  const corners = [
-    { x: box.x0, y: box.y0 }, { x: box.x1, y: box.y0 },
-    { x: box.x0, y: box.y1 }, { x: box.x1, y: box.y1 },
-  ];
+  const corners = glareCorners(box);
   const results = corners.map(c => {
     const r = analyzeLuminousPoint(c.x, c.y, eyeH, side, W, occluded);
     return { ...r, corner: c };
   });
   const comb = combineGlareCorners(results, side);
-  const rep = { x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2 };
+  const rep = corners.length
+    ? { x: corners.reduce((s, c) => s + c.x, 0) / corners.length, y: corners.reduce((s, c) => s + c.y, 0) / corners.length }
+    : { x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2 };
   const used = comb.corner || rep;
   return {
     status: comb.status,
