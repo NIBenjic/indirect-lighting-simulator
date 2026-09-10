@@ -24,6 +24,12 @@ import {
   validateLight,
 } from './core.js';
 import {
+  analyzeGlareBox,
+  hitIsFixture,
+  inGlareBox,
+  segmentOccluded,
+} from './glare.js';
+import {
   TEMPLATES,
   TEMPLATE_LABELS,
   arcEndpoints,
@@ -52,7 +58,7 @@ const S = {
   refl:  { ceiling: 0.85, wall: 0.75, floor: 0.35 },
   ray:   { density: 20, bounces: 1 },
   eye:   { height: 1.65, xRatio: 0.50, show: true },
-  glare: { width: 0.08, height: 0.04, hAnchor: 'wall', vAnchor: 'center' }, // 燈具裸露邊界（公尺）＋基準角
+  glare: { width: 0.04, height: 0.04, hAnchor: 'wall', vAnchor: 'center' }, // 燈具裸露邊界（公尺）＋基準角
   // 指定點照度估算：燈帶每公尺光通量(lm/m)、發光分佈、受光面朝向、量測點清單(世界座標,公尺;結果內嵌)、放置模式旗標
   // 每點：{ x, y, result: { lux, direct, indirect } | null }；placing 不持久化
   illum: { lmPerM: 1000, dist: 'lambert', normal: 'up', points: [], placing: false },
@@ -74,9 +80,10 @@ function toWorld(u, d, side, W, H) {
   return { x: side === 'L' ? u : W - u, y: H - d };
 }
 
-// 燈具裸露邊界矩形（公尺）：以光源 (lx,ly) 為基準角，依水平/垂直基準設定延伸。
+// 燈具裸露邊界（公尺）：以光源為錨，依水平/垂直基準延伸，再繞掛點隨自體旋轉。
 //   hAnchor: 'wall' 靠牆（向室內延伸）/ 'center' 置中 / 'interior' 靠室內（向牆延伸）
 //   vAnchor: 'top' 上（向下延伸）/ 'center' 置中 / 'bottom' 下（向上延伸）
+// 回傳未旋轉 AABB (x0,x1,y0,y1) + 旋轉原點/角 + 世界座標四角。
 function glareBox(lx, ly, side) {
   const gW = Math.max(0, S.glare.width), gH = Math.max(0, S.glare.height);
   const inward = side === 'L' ? 1 : -1;   // 朝室內的 x 方向
@@ -90,7 +97,18 @@ function glareBox(lx, ly, side) {
   if (S.glare.vAnchor === 'top')         { y0 = ly - gH; y1 = ly; }
   else if (S.glare.vAnchor === 'bottom') { y0 = ly;      y1 = ly + gH; }
   else                                   { y0 = ly - gH / 2; y1 = ly + gH / 2; }
-  return { x0, x1, y0, y1 };
+  // 右側發光方向鏡像，框跟著轉（左 +θ、右 −θ）
+  const phi = inward * (S.cove.light.rotationAngle || 0) * Math.PI / 180;
+  const rot = (x, y) => {
+    if (Math.abs(phi) < 1e-12) return { x, y };
+    const dx = x - lx, dy = y - ly;
+    const c = Math.cos(phi), s = Math.sin(phi);
+    return { x: lx + dx * c - dy * s, y: ly + dx * s + dy * c };
+  };
+  const corners = [
+    rot(x0, y0), rot(x1, y0), rot(x1, y1), rot(x0, y1),
+  ];
+  return { x0, x1, y0, y1, ox: lx, oy: ly, phi, corners };
 }
 
 // 光源顯示色：色相完全依色溫（與 kelvinToColor 一致），亮度僅影響
@@ -332,8 +350,12 @@ function visibilityToSource(px, py, ux, uy, r, C) {
   while (guard++ < 24) {
     const hit = findHit(ox, oy, ux, uy, C.scene, null);
     if (!hit) break;                                       // 朝光源無遮擋
-    if (Math.hypot(hit.x - px, hit.y - py) >= r - 1e-3) break;  // 命中在光源之外→不遮擋
+    const dist = Math.hypot(hit.x - px, hit.y - py);
+    if (dist >= r - 1e-3) break;                           // 命中在光源之外→不遮擋
     if (hit.pass) break;                                   // 穿牆（光源在室內，不視為遮擋）
+    if (r - dist < 0.005 || hitIsFixture(hit, C.sources)) { // 燈具體積／貼源自遮擋
+      ox = hit.x + ux * 1e-4; oy = hit.y + uy * 1e-4; continue;
+    }
     if (hit.transparency > 0) { vis *= hit.transparency; if (vis < 1e-3) return 0; ox = hit.x + ux * 1e-4; oy = hit.y + uy * 1e-4; continue; }
     return 0;                                              // 不透光遮擋
   }
@@ -461,6 +483,7 @@ function radSignature(scene, sources, opt) {
     W: scene.W, H: scene.H, refl: scene.refl, wr: scene.wallReflect,
     sides: [!!scene.leftCove, !!scene.rightCove], form: S.cove.form,
     src: sources.map(s => [s.lx, s.ly, s.sign, s.axisRad, s.halfR]),
+    glare: S.glare, rot: S.cove.light.rotationAngle,
     dist: opt.dist, lm: opt.lmPerM,
   });
 }
@@ -489,8 +512,8 @@ function illumSources(scene) {
   const out = [];
   const half = (S.cove.light.emissionAngle / 2) * Math.PI / 180;
   const axis = S.cove.light.rotationAngle * Math.PI / 180;
-  if (scene.leftCove)  out.push({ lx: scene.leftCove.light.lx,  ly: scene.leftCove.light.ly,  sign: 1,  axisRad: axis, halfR: half });
-  if (scene.rightCove) out.push({ lx: scene.rightCove.light.lx, ly: scene.rightCove.light.ly, sign: -1, axisRad: axis, halfR: half });
+  if (scene.leftCove)  out.push({ lx: scene.leftCove.light.lx,  ly: scene.leftCove.light.ly,  sign: 1,  axisRad: axis, halfR: half, box: glareBox(scene.leftCove.light.lx, scene.leftCove.light.ly, 'L') });
+  if (scene.rightCove) out.push({ lx: scene.rightCove.light.lx, ly: scene.rightCove.light.ly, sign: -1, axisRad: axis, halfR: half, box: glareBox(scene.rightCove.light.lx, scene.rightCove.light.ly, 'R') });
   return out;
 }
 // 重算照度並更新面板（僅照度分頁啟用且已放置量測點時）：逐點計算，結果內嵌於各點
@@ -670,7 +693,7 @@ function drawCoveGeo(scene, side) {
 //   非 silhouette：直接取標記角。
 //   silhouette：取「最高（最接近天花板）」的不透光材料邊角作為開口遮擋緣；
 //   同高時取最朝室內者（最易暴露光源）。不論該角在光源上下皆適用——光源高於
-//   遮擋緣即為眩光情形（由 analyzePoint 判定）。
+//   遮擋緣即為眩光情形（視線遮擋分析於 analyzeSide）。
 //   註：v1 啟發式，對極複雜剖面非嚴格精確，僅供參考。
 function getShieldPoint(cove, side, lightX, lightY) {
   const sh = cove.shield;
@@ -684,7 +707,7 @@ function getShieldPoint(cove, side, lightX, lightY) {
   let best = cands[0];
   for (const p of cands) {
     if (p.y > best.y + 1e-6) best = p;                          // 更高（世界 y 大 = 近天花板）
-    else if (Math.abs(p.y - best.y) < 1e-6 && inward * (p.x - best.x) < 0) best = p; // 同高取更靠牆（槽側，較保守）
+    else if (Math.abs(p.y - best.y) < 1e-6 && inward * (p.x - best.x) > 0) best = p; // 同高取更朝室內（最易暴露光源）
   }
   return { x: best.x, y: best.y, hasCutoff: !!sh.hasCutoff };
 }
@@ -811,25 +834,52 @@ function drawDragBadge() {
   ctx.restore();
 }
 
-// ── 遮光截止角虛線 ──────────────────────────────────────────────
+// ── 遮光截止角虛線（光源向上、經實際掠射點延伸至天花）────────────────
+function firstOpaqueToward(ox, oy, tx, ty, scene, box) {
+  const dx = tx - ox, dy = ty - oy;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len, uy = dy / len;
+  let x = ox, y = oy, guard = 0;
+  while (guard++ < 24) {
+    const hit = findHit(x, y, ux, uy, scene, null);
+    if (!hit || hit.pass) return null;
+    if (inGlareBox(hit.x, hit.y, box) || (hit.transparency || 0) > 0) {
+      x = hit.x + ux * 1e-4;
+      y = hit.y + uy * 1e-4;
+      continue;
+    }
+    return hit;
+  }
+  return null;
+}
+
 function drawCriticalAngle(scene, side) {
   const cove = side === 'L' ? scene.leftCove : scene.rightCove;
   if (!cove) return;
-  const { H } = scene;
+  const { H, W } = scene;
   const { lx: lightX, ly: lightY } = cove.light;
-  const sp = getShieldPoint(cove, side, lightX, lightY);
-  if (!sp.hasCutoff) return;
-  // 遮光臨界點取遮擋邊緣（含材料厚度偏移）
-  const baffleX = sp.x;
-  const baffleTop = sp.y;
-  if (lightY >= baffleTop) return;
-
-  const ddx = baffleX - lightX, ddy = baffleTop - lightY;
-  const len  = Math.sqrt(ddx * ddx + ddy * ddy);
-  if (len < 1e-6) return;
-  const nx = ddx / len, ny = ddy / len;
-  const tCeil = (H - baffleTop) / ny;
-  const xEnd  = baffleX + nx * tCeil;
+  const box = glareBox(lightX, lightY, side);
+  const inward = side === 'L' ? 1 : -1;
+  // 只取「在光源之上、朝室內」且光線先碰到該點的頂點，避免把底板近牆高角
+  // 或斜向燈具外輪廓的隨機高點當成天花截止角。
+  const cands = (cove.shield.candidates || []).filter(p =>
+    p.y > lightY + 1e-4 && inward * (p.x - lightX) > 1e-4);
+  let best = null;
+  for (const p of cands) {
+    const hit = firstOpaqueToward(lightX, lightY, p.x, p.y, scene, box);
+    if (!hit) continue;
+    if (Math.hypot(hit.x - p.x, hit.y - p.y) > 0.02) continue;
+    const ddx = p.x - lightX, ddy = p.y - lightY;
+    const len = Math.hypot(ddx, ddy);
+    if (len < 1e-6 || ddy <= 1e-6) continue;
+    const nx = ddx / len, ny = ddy / len;
+    const tCeil = (H - p.y) / ny;
+    if (tCeil <= 0) continue;
+    const xEnd = p.x + nx * tCeil;
+    const wallDist = side === 'L' ? xEnd : W - xEnd;
+    if (!best || wallDist < best.wallDist) best = { p, xEnd, wallDist };
+  }
+  if (!best) return;
 
   ctx.save();
   ctx.setLineDash([5, 5]);
@@ -837,8 +887,8 @@ function drawCriticalAngle(scene, side) {
   ctx.lineWidth = 1.2;
   ctx.beginPath();
   ctx.moveTo(mx(lightX), my(lightY));
-  ctx.lineTo(mx(baffleX), my(baffleTop));
-  ctx.lineTo(mx(xEnd), my(H));
+  ctx.lineTo(mx(best.p.x), my(best.p.y));
+  ctx.lineTo(mx(best.xEnd), my(H));
   ctx.stroke();
   ctx.restore();
 }
@@ -868,16 +918,21 @@ function drawGlareBox(scene, side) {
   const gW = Math.max(0, S.glare.width), gH = Math.max(0, S.glare.height);
   if (gW <= 0 && gH <= 0) return;
   const { lx, ly } = cove.light;
-  const { x0, x1, y0, y1 } = glareBox(lx, ly, side);
+  const box = glareBox(lx, ly, side);
+  const pts = box.corners;
+  if (!pts || pts.length < 2) return;
   const { r8, g8, b8 } = lightDisplayColor();
-  const px = mx(x0), py = my(y1), pw = (x1 - x0) * _scale, ph = (y1 - y0) * _scale;
   ctx.save();
   ctx.fillStyle = `rgba(${r8},${g8},${b8},0.16)`;
-  ctx.fillRect(px, py, pw, ph);
   ctx.setLineDash([4, 3]);
   ctx.lineWidth = 1.2;
   ctx.strokeStyle = `rgba(${r8},${g8},${b8},0.7)`;
-  ctx.strokeRect(px, py, pw, ph);
+  ctx.beginPath();
+  ctx.moveTo(mx(pts[0].x), my(pts[0].y));
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(mx(pts[i].x), my(pts[i].y));
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -898,11 +953,21 @@ function glareHandles(side) {
   if (vCenter) yEdges = [ { y: b.y1, s: 1 }, { y: b.y0, s: -1 } ];
   else if (S.glare.vAnchor === 'top') yEdges = [ { y: b.y0, s: -1 } ];
   else yEdges = [ { y: b.y1, s: 1 } ];   // bottom：向上延伸
+  const phi = b.phi || 0;
+  const rot = (x, y) => {
+    if (Math.abs(phi) < 1e-12) return { x, y };
+    const dx = x - lw.x, dy = y - lw.y;
+    const c = Math.cos(phi), s = Math.sin(phi);
+    return { x: lw.x + dx * c - dy * s, y: lw.y + dx * s + dy * c };
+  };
   const out = [];
-  for (const xe of xEdges) out.push({ kind: 'glareW', x: xe.x, y: yMid, sH: xe.s, sV: 0 });
-  for (const ye of yEdges) out.push({ kind: 'glareH', x: xMid, y: ye.y, sH: 0, sV: ye.s });
-  for (const xe of xEdges) for (const ye of yEdges) out.push({ kind: 'glareWH', x: xe.x, y: ye.y, sH: xe.s, sV: ye.s });
-  return { lx: lw.x, ly: lw.y, handles: out };
+  for (const xe of xEdges) { const p = rot(xe.x, yMid); out.push({ kind: 'glareW', x: p.x, y: p.y, sH: xe.s, sV: 0 }); }
+  for (const ye of yEdges) { const p = rot(xMid, ye.y); out.push({ kind: 'glareH', x: p.x, y: p.y, sH: 0, sV: ye.s }); }
+  for (const xe of xEdges) for (const ye of yEdges) {
+    const p = rot(xe.x, ye.y);
+    out.push({ kind: 'glareWH', x: p.x, y: p.y, sH: xe.s, sV: ye.s });
+  }
+  return { lx: lw.x, ly: lw.y, handles: out, phi };
 }
 // 眩光框縮放把手（僅「視角」分頁顯示/可拖曳）
 function drawGlareHandles(scene, side) {
@@ -922,65 +987,38 @@ function drawGlareHandles(scene, side) {
 // ══ 眩光分析 ══════════════════════════════════════════════════════
 /**
  * 分析單側燈槽在指定眼高的眩光狀況。
- * 遮擋邊緣 = 擋板頂端（有啟用擋板時）或底板前緣（無擋板時，下檔板仍遮視角）。
- * 透過光源與該邊緣的連線、再與眼高線求交點，得到眩光/安全分界 x。
- * 回傳的 baffleTop 欄位實為「遮擋邊緣高度」(edgeY)。
+ * 對燈具裸露邊界四個角沿眼高線做實際視線遮擋測試（非「最高角」啟發式），
+ * 找隱藏↔可見轉換點。回傳的 baffleX/baffleTop 為繪圖用的實際掠射點。
  * status:
  *   'shielded'  完全遮蔽（室內任何距離都看不到光源）
  *   'allGlare'  全區可見
  *   'safeNear'  近牆安全、超過 xGraze 後可見光源
  *   'safeFar'   遠處安全、未達 xGraze 時可見光源
  */
-// 針對單一光源點計算遮蔽狀態（眩光分析核心）
-function analyzePoint(px, py, baffleX, edgeY, eyeH) {
-  const eAbove = eyeH > edgeY;
-  const lAbove = py   > edgeY;
-  if (!eAbove && !lAbove) return { status: 'shielded', xGraze: null };
-  if (eAbove && lAbove)   return { status: 'allGlare', xGraze: null };
-  // 光源恰好齊平遮擋邊緣：掠射線水平。眼高在邊緣上方→全區可見；在下方→完全遮蔽。
-  // （此時 lAbove 僅因浮點誤差而與 eAbove 不一致，須以眼高為準，否則會誤判全區可見。）
-  if (Math.abs(edgeY - py) < 1e-6) return { status: eAbove ? 'allGlare' : 'shielded', xGraze: null };
-  const t = (eyeH - py) / (edgeY - py);
-  return { status: lAbove ? 'safeNear' : 'safeFar', xGraze: px + t * (baffleX - px) };
+function makeGlareOccluded(scene, box) {
+  return (ax, ay, bx, by) => segmentOccluded(
+    ax, ay, bx, by,
+    (ox, oy, dx, dy) => findHit(ox, oy, dx, dy, scene, null),
+    { skipHit: (hit) => inGlareBox(hit.x, hit.y, box) },
+  );
 }
 
-function analyzeSide(cove, side, W, eyeH) {
+function analyzeSide(scene, cove, side, eyeH) {
+  const { W } = scene;
   const { lx: lightX, ly: lightY } = cove.light;
-
-  // 遮擋邊緣：由樣式決定（classic 為擋板槽側頂角或底板前緣，含材料厚度偏移）。
-  const sp = getShieldPoint(cove, side, lightX, lightY);
-  const baffleX = sp.x;
-  const edgeY = sp.y;
-
-  // 燈具裸露邊界：矩形範圍，基準角（光源所在角）可設定。
-  // 把光源視為一個矩形範圍，眩光取「最易被看見」的角（眩光區最大）作為判定。
   const box = glareBox(lightX, lightY, side);
-  const corners = [
-    { x: box.x0, y: box.y0 }, { x: box.x1, y: box.y0 },
-    { x: box.x0, y: box.y1 }, { x: box.x1, y: box.y1 },
-  ];
-  // allGlare / shielded 時的繪圖代表點取矩形中心
-  const rep = { x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2 };
+  const occluded = makeGlareOccluded(scene, box);
+  const r = analyzeGlareBox(box, eyeH, side, W, occluded);
 
-  let anyAll = false, best = null, bestCorner = null;
-  for (const c of corners) {
-    const r = analyzePoint(c.x, c.y, baffleX, edgeY, eyeH);
-    if (r.status === 'allGlare') { anyAll = true; continue; }
-    if (r.status === 'shielded') continue;
-    // 取「眩光區最大（最裸露）」的臨界角。眩光條件依 side/status 不同，
-    // 較小 xGraze 較裸露者：左側 safeNear、右側 safeFar；其餘較大 xGraze 較裸露。
-    if (!best) { best = r; bestCorner = c; continue; }
-    const smallerWorse = (side === 'L' && r.status === 'safeNear') ||
-                         (side === 'R' && r.status === 'safeFar');
-    const worse = smallerWorse ? (r.xGraze < best.xGraze) : (r.xGraze > best.xGraze);
-    if (worse) { best = r; bestCorner = c; }
+  let baffleX = r.lightX, baffleTop = r.lightY;
+  if (r.xGraze != null) {
+    const hit = firstOpaqueToward(r.lightX, r.lightY, r.xGraze, eyeH, scene, box);
+    if (hit) { baffleX = hit.x; baffleTop = hit.y; }
+  } else {
+    const sp = getShieldPoint(cove, side, lightX, lightY);
+    baffleX = sp.x; baffleTop = sp.y;
   }
-
-  if (anyAll)
-    return { status: 'allGlare', lightX: rep.x, lightY: rep.y, baffleX, baffleTop: edgeY, xGraze: null, box };
-  if (!best)
-    return { status: 'shielded', lightX: rep.x, lightY: rep.y, baffleX, baffleTop: edgeY, xGraze: null, box };
-  return { status: best.status, lightX: bestCorner.x, lightY: bestCorner.y, baffleX, baffleTop: edgeY, xGraze: best.xGraze, box };
+  return { ...r, baffleX, baffleTop };
 }
 
 // ══ 眼睛視角 / 安全距離 ═══════════════════════════════════════════
@@ -1003,15 +1041,12 @@ function drawEye(scene) {
 
   for (const [cove, side] of [[scene.leftCove, 'L'], [scene.rightCove, 'R']]) {
     if (!cove) continue;
-    const a   = analyzeSide(cove, side, W, eyeH);
+    const a   = analyzeSide(scene, cove, side, eyeH);
     const tag = side === 'L' ? '左側' : '右側';
 
-    // 觀察者目前位置是否直視光源
-    let seen = false;
-    if      (a.status === 'allGlare') seen = true;
-    else if (a.status === 'shielded') seen = false;
-    else if (a.status === 'safeNear') seen = side === 'L' ? eyeX > a.xGraze : eyeX < a.xGraze;
-    else if (a.status === 'safeFar')  seen = side === 'L' ? eyeX < a.xGraze : eyeX > a.xGraze;
+    // 觀察者目前位置是否直視光源（實際視線，非單點啟發式）
+    const occluded = makeGlareOccluded(scene, a.box);
+    const seen = !occluded(eyeX, eyeH, a.lightX, a.lightY);
 
     // 觀察者視線
     ctx.save();
@@ -2473,9 +2508,14 @@ function dragMove(sx, sy, mod) {
       const wx = (sx - _ox) / _scale, wy = (_oy - sy) / _scale;
       const fxp = S.cove.light.fixture, lw = toWorld(fxp.u, fxp.d, dragState.side, S.room.W, S.room.H);
       const snapC = v => clamp(Math.round(Math.max(0, v) / 0.001) * 0.001, 0, 0.5);   // 對齊滑桿 0~500mm / 1mm，夾在 0 以上
-      // 以把手所在邊的「朝外符號」(sH/sV) 取帶號距離（越過光源原點即夾回 0，避免反彈）；置中基準為對稱故 ×2
-      if (dragState.sH) S.glare.width  = snapC((wx - lw.x) * dragState.sH * (S.glare.hAnchor === 'center' ? 2 : 1));
-      if (dragState.sV) S.glare.height = snapC((wy - lw.y) * dragState.sV * (S.glare.vAnchor === 'center' ? 2 : 1));
+      // 投影到燈具局部軸（含自體旋轉）：右側 φ 已鏡像
+      const phi = (dragState.side === 'L' ? 1 : -1) * (S.cove.light.rotationAngle || 0) * Math.PI / 180;
+      const dx = wx - lw.x, dy = wy - lw.y;
+      const c = Math.cos(phi), s = Math.sin(phi);
+      const localX = dx * c + dy * s;
+      const localY = -dx * s + dy * c;
+      if (dragState.sH) S.glare.width  = snapC(localX * dragState.sH * (S.glare.hAnchor === 'center' ? 2 : 1));
+      if (dragState.sV) S.glare.height = snapC(localY * dragState.sV * (S.glare.vAnchor === 'center' ? 2 : 1));
       const setG = (id, val) => { const el = document.getElementById(id); if (el) el.value = Math.round(val * 1000);
         const vl = document.getElementById(id + '-val'); if (vl) vl.textContent = Math.round(val * 1000) + ' mm'; };
       setG('glare-width', S.glare.width); setG('glare-height', S.glare.height);

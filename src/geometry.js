@@ -2,6 +2,7 @@
 import { clamp, THICK } from './core.js';
 
 const WALL_EPS = 1e-4;
+const MITER_LIMIT = 4; // 尖角 miter 長度上限（單位：半厚）；超過改 bevel，避免反折
 
 // 圓弧 → 切線段（chord-error≈3mm 控制段數，夾 4..64）
 export function arcPoints(arc) {
@@ -29,25 +30,60 @@ export function arcEndpoints(arc) {
 export function elementCenterline(el) {
   return el.path.kind === 'arc' ? arcPoints(el.path) : el.path.points.map(p => ({ u: p.u, d: p.d }));
 }
-// 厚片：中心線 ±thickness/2 → 封閉外輪廓 + 邊界物理面
+
+function segTangent(a, b) {
+  let tu = b.u - a.u, td = b.d - a.d;
+  const L = Math.hypot(tu, td) || 1;
+  tu /= L; td /= L;
+  return { tu, td, nu: -td, nd: tu }; // 左法線（u,d 平面 CCW）
+}
+
+function offsetPt(p, t, side, h) {
+  return { u: p.u + t.nu * side * h, d: p.d + t.nd * side * h };
+}
+
+// 直線 p + t·r 與 q + u·s 的交點；平行回 null
+function lineIntersect(p, r, q, s) {
+  const den = r.u * s.d - r.d * s.u;
+  if (Math.abs(den) < 1e-12) return null;
+  const t = ((q.u - p.u) * s.d - (q.d - p.d) * s.u) / den;
+  return { u: p.u + t * r.u, d: p.d + t * r.d };
+}
+
+// 厚片：各段平行偏移，轉角 miter（過長則 bevel）。避免 (next-prev) 平均切線在尖角把左右側翻到對面。
 export function ribbonFromCenter(pts, thickness) {
   const h = (thickness || THICK) / 2;
+  const n = pts.length;
+  if (n < 2) return { outline: [], faces: [] };
+
+  const T = [];
+  for (let i = 0; i < n - 1; i++) T.push(segTangent(pts[i], pts[i + 1]));
+
+  function sideAt(i, side) {
+    if (i === 0) return offsetPt(pts[0], T[0], side, h);
+    if (i === n - 1) return offsetPt(pts[n - 1], T[n - 2], side, h);
+    const t0 = T[i - 1], t1 = T[i];
+    const p0 = offsetPt(pts[i], t0, side, h);
+    const p1 = offsetPt(pts[i], t1, side, h);
+    const hit = lineIntersect(p0, { u: t0.tu, d: t0.td }, p1, { u: t1.tu, d: t1.td });
+    if (!hit) return p0;                                 // 共線：任一端即可
+    const dist = Math.hypot(hit.u - pts[i].u, hit.d - pts[i].d);
+    if (dist > MITER_LIMIT * h) return p0;               // 過尖：切在入邊偏移，不讓 miter 飛出／反折
+    return hit;
+  }
+
   const left = [], right = [];
-  for (let i = 0; i < pts.length; i++) {
-    const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
-    let tu = b.u - a.u, td = b.d - a.d; const L = Math.hypot(tu, td) || 1; tu /= L; td /= L;
-    const nu = -td, nd = tu;
-    left.push({ u: pts[i].u + nu * h, d: pts[i].d + nd * h });
-    right.push({ u: pts[i].u - nu * h, d: pts[i].d - nd * h });
+  for (let i = 0; i < n; i++) {
+    left.push(sideAt(i, 1));
+    right.push(sideAt(i, -1));
   }
   const faces = [];
-  for (let i = 0; i < pts.length - 1; i++) {
+  for (let i = 0; i < n - 1; i++) {
     faces.push({ a: left[i], b: left[i + 1] });
     faces.push({ a: right[i], b: right[i + 1] });
   }
-  const last = pts.length - 1;
   faces.push({ a: left[0], b: right[0] });
-  faces.push({ a: left[last], b: right[last] });
+  faces.push({ a: left[n - 1], b: right[n - 1] });
   return { outline: left.concat(right.slice().reverse()), faces };
 }
 // 編譯 form → local 幾何 { fillLoops, faces, light, shield, bottomD }
