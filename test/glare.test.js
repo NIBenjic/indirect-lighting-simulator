@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   analyzeGlareBox,
   analyzeLuminousPoint,
+  boxVisibleFrom,
   combineGlareCorners,
   glareCorners,
   hitIsFixture,
@@ -187,5 +188,23 @@ describe('axis-aligned glare box (rotation does not tilt the box)', () => {
     expect(hitIsFixture({ x: 0.11, y: 2.80 }, sources)).toBe(true);
     expect(hitIsFixture({ x: 0.09, y: 2.801 }, sources)).toBe(true);
     expect(hitIsFixture({ x: 1, y: 1.65 }, sources)).toBe(false);
+  });
+});
+
+describe('boxVisibleFrom', () => {
+  it('sees a box in an empty room and hides it behind an opaque slab', () => {
+    const box = { x0: 0.07, x1: 0.11, y0: 2.78, y1: 2.82 };
+    expect(boxVisibleFrom(4, 1.65, box, occludedFromSegs([]))).not.toBeNull();
+    const slab = [{ ax: 0.20, ay: 0.1, bx: 0.20, by: 2.95 }];
+    expect(boxVisibleFrom(4, 1.65, box, occludedFromSegs(slab))).toBeNull();
+  });
+
+  it('returns a corner that actually belongs to the box', () => {
+    const box = { x0: 0.07, x1: 0.11, y0: 2.78, y1: 2.82 };
+    const c = boxVisibleFrom(4, 1.65, box, occludedFromSegs([]));
+    expect(c.x).toBeGreaterThanOrEqual(box.x0);
+    expect(c.x).toBeLessThanOrEqual(box.x1);
+    expect(c.y).toBeGreaterThanOrEqual(box.y0);
+    expect(c.y).toBeLessThanOrEqual(box.y1);
   });
 });
